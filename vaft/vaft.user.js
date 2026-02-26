@@ -34,7 +34,7 @@
         scope.SkipPlayerReloadOnHevc = false;// If true this will skip player reload on streams which have 2k/4k quality (if you enable this and you use the 2k/4k quality setting you'll get error #4000 / #3000 / spinning wheel on chrome based browsers)
         scope.AlwaysReloadPlayerOnAd = false;// Always pause/play when entering/leaving ads
         scope.ReloadPlayerAfterAd = true;// After the ad finishes do a player reload instead of pause/play
-        scope.PlayerReloadMinimalRequestsTime = 1500;
+        scope.PlayerReloadMinimalRequestsTime = 1600;
         scope.PlayerReloadMinimalRequestsPlayerIndex = 2;//autoplay
         scope.HasTriggeredPlayerReload = false;
         scope.StreamInfos = [];
@@ -46,11 +46,11 @@
         scope.AuthorizationHeader = undefined;
         scope.SimulatedAdsDepth = 0;
         scope.PlayerBufferingFix = true;// If true this will pause/play the player when it gets stuck buffering
-        scope.PlayerBufferingDelay = 500;// How often should we check the player state (in milliseconds)
+        scope.PlayerBufferingDelay = 600;// How often should we check the player state (in milliseconds)
         scope.PlayerBufferingSameStateCount = 3;// How many times of seeing the same player state until we trigger pause/play (it will only trigger it one time until the player state changes again)
         scope.PlayerBufferingDangerZone = 1;// The buffering time left (in seconds) when we should ignore the players playback position in the player state check
         scope.PlayerBufferingDoPlayerReload = false;// If true this will do a player reload instead of pause/play (player reloading is better at fixing the playback issues but it takes slightly longer)
-        scope.PlayerBufferingMinRepeatDelay = 5000;// Minimum delay (in milliseconds) between each pause/play (this is to avoid over pressing pause/play when there are genuine buffering problems)
+        scope.PlayerBufferingMinRepeatDelay = 12000;// Minimum delay (in milliseconds) between each pause/play (this is to avoid over pressing pause/play when there are genuine buffering problems)
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
@@ -273,7 +273,7 @@
                     });
                 } else if (url.includes('/channel/hls/') && !url.includes('picture-by-picture')) {
                     V2API = url.includes('/api/v2/');
-                    const channelName = (new URL(url)).pathname.match(/([^\/]+)(?=\.\w+$)/)[0];
+                    const channelName = (new URL(url)).pathname.match(/([^\/]+)(?=\.\w+$)/)?.[0];
                     if (ForceAccessTokenPlayerType) {
                         // parent_domains is used to determine if the player is embeded and stripping it gets rid of fake ads
                         const tempUrl = new URL(url);
@@ -286,8 +286,8 @@
                                 const encodingsM3u8 = await response.text();
                                 const serverTime = getServerTimeFromM3u8(encodingsM3u8);
                                 let streamInfo = StreamInfos[channelName];
-                                if (streamInfo != null && streamInfo.EncodingsM3U8 != null && (await realFetch(streamInfo.EncodingsM3U8.match(/^https:.*\.m3u8$/m)[0])).status !== 200) {
-                                    // The cached encodings are dead (the stream probably restarted)
+                                const cachedUrl = streamInfo?.EncodingsM3U8?.match(/^https:.*\.m3u8$/m)?.[0];
+                                if (streamInfo != null && streamInfo.EncodingsM3U8 != null && cachedUrl && (await realFetch(cachedUrl)).status !== 200) {
                                     streamInfo = null;
                                 }
                                 if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
@@ -377,10 +377,10 @@
     function getServerTimeFromM3u8(encodingsM3u8) {
         if (V2API) {
             const matches = encodingsM3u8.match(/#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="([^"]+)"/);
-            return matches.length > 1 ? matches[1] : null;
+            return matches && matches.length > 1 ? matches[1] : null;
         }
         const matches = encodingsM3u8.match('SERVER-TIME="([0-9.]+)"');
-        return matches.length > 1 ? matches[1] : null;
+        return matches && matches.length > 1 ? matches[1] : null;
     }
     function replaceServerTimeInM3u8(encodingsM3u8, newServerTime) {
         if (V2API) {
@@ -421,9 +421,9 @@
             streamInfo.NumStrippedAdSegments = 0;
         }
         streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
-        AdSegmentCache.forEach((key, value, map) => {
-            if (value < Date.now() - 120000) {
-                map.delete(key);
+        AdSegmentCache.forEach((value, key, map) => {
+            if (value < Date.now() - 120000) { // value is the timestamp
+                map.delete(key);               // key is the URL
             }
         });
         return lines.join('\n');
@@ -489,7 +489,7 @@
                             // Only request one .ts file per .m3u8 request to avoid making too many requests
                             //console.log('Fetch ad .ts file');
                             streamInfo.RequestedAds.add(lines[i + 1]);
-                            fetch(lines[i + 1]).then((response)=>{response.blob()});
+                            fetch(lines[i + 1]).then((response) => response.blob());
                             break;
                         }
                     }
@@ -579,15 +579,16 @@
                 backupPlayerType = FallbackPlayerType;
                 backupM3u8 = fallbackM3u8;
             }
-            if (backupM3u8) {
+                        if (backupM3u8) {
                 textStr = backupM3u8;
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
                     streamInfo.ActiveBackupPlayerType = backupPlayerType;
                     console.log(`Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType})`);
                 }
             }
-            // TODO: Improve hevc stripping. It should always strip when there is a codec mismatch (both ways)
-            const stripHevc = isHevc && streamInfo.ModifiedM3U8;
+                        // TODO: Improve hevc stripping...
+            // FIX: Only strip if we failed to find a clean backup stream
+            const stripHevc = !backupM3u8 && isHevc && streamInfo.ModifiedM3U8;
             if (IsAdStrippingEnabled || stripHevc) {
                 textStr = stripAdSegments(textStr, stripHevc, streamInfo);
             }
@@ -652,6 +653,7 @@
     }
     function gqlRequest(body, playerType) {
         if (!GQLDeviceID) {
+            GQLDeviceID = '';
             const dcharacters = 'abcdefghijklmnopqrstuvwxyz0123456789';
             const dcharactersLength = dcharacters.length;
             for (let i = 0; i < 32; i++) {
@@ -707,29 +709,32 @@
                     const position = player.core?.state?.position;
                     const bufferedPosition = player.core?.state?.bufferedPosition;
                     const bufferDuration = player.getBufferDuration();
-                    //console.log('position:' + position + ' bufferDuration:' + bufferDuration + ' bufferPosition:' + bufferedPosition);
-                    // NOTE: This could be improved. It currently lets the player fully eat the full buffer before it triggers pause/play
-                    if (position > 5 &&// changed from >0 to >5 due to issues with prerolls. TODO: Improve this, player could get stuck
-                        (playerBufferState.position == position || bufferDuration < PlayerBufferingDangerZone)  &&
-                        playerBufferState.bufferedPosition == bufferedPosition &&
-                        playerBufferState.bufferDuration >= bufferDuration &&
-                        (position != 0 || bufferedPosition != 0 || bufferDuration != 0)
-                       ) {
-                        playerBufferState.numSame++;
-                        if (playerBufferState.numSame == PlayerBufferingSameStateCount) {
-                            console.log('Attempt to fix buffering position:' + playerBufferState.position + ' bufferedPosition:' + playerBufferState.bufferedPosition + ' bufferDuration:' + playerBufferState.bufferDuration);
-                            doTwitchPlayerTask(!PlayerBufferingDoPlayerReload, PlayerBufferingDoPlayerReload, false);
-                            const isPausePlay = !PlayerBufferingDoPlayerReload;
-                            const isReload = PlayerBufferingDoPlayerReload;
-                            doTwitchPlayerTask(isPausePlay, isReload);
-                            playerBufferState.lastFixTime = Date.now();
+
+                    if (position !== undefined && bufferedPosition !== undefined) {
+                        //console.log('position:' + position + ' bufferDuration:' + bufferDuration + ' bufferPosition:' + bufferedPosition);
+                        // NOTE: This could be improved. It currently lets the player fully eat the full buffer before it triggers pause/play
+                        if ((playerBufferState.position == position || bufferDuration < PlayerBufferingDangerZone) &&
+                            playerBufferState.bufferedPosition == bufferedPosition &&
+                            playerBufferState.bufferDuration >= bufferDuration &&
+                            (position != 0 || bufferedPosition != 0 || bufferDuration != 0)
+                           ) {
+                            playerBufferState.numSame++;
+                            if (playerBufferState.numSame == PlayerBufferingSameStateCount) {
+                                console.log('Attempt to fix buffering position:' + playerBufferState.position + ' bufferedPosition:' + playerBufferState.bufferedPosition + ' bufferDuration:' + playerBufferState.bufferDuration);
+                                const isPausePlay = !PlayerBufferingDoPlayerReload;
+                                const isReload = PlayerBufferingDoPlayerReload;
+                                doTwitchPlayerTask(isPausePlay, isReload);
+                                playerBufferState.lastFixTime = Date.now();
+                            }
+                        } else {
+                            playerBufferState.numSame = 0;
                         }
+                        playerBufferState.position = position;
+                        playerBufferState.bufferedPosition = bufferedPosition;
+                        playerBufferState.bufferDuration = bufferDuration;
                     } else {
                         playerBufferState.numSame = 0;
                     }
-                    playerBufferState.position = position;
-                    playerBufferState.bufferedPosition = bufferedPosition;
-                    playerBufferState.bufferDuration = bufferDuration;
                 }
             } catch (err) {
                 console.error('error when monitoring player for buffering: ' + err);
@@ -834,7 +839,11 @@
             console.log('Could not find player state');
             return;
         }
-        if (player.isPaused() || player.core?.paused) {
+        // FIX: Store the paused state, but DO NOT return immediately if we are reloading.
+        // Returning early prevents the stream from switching back after an ad if the player was paused.
+        const wasPaused = player.isPaused() || player.core?.paused;
+        // If we are just toggling pause/play (not a full reload) and it's already paused, stop here.
+        if (isPausePlay && !isReload && wasPaused) {
             return;
         }
         if (isPausePlay) {
@@ -864,7 +873,11 @@
             console.log('Reloading Twitch player');
             playerState.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
             postTwitchWorkerMessage('TriggeredPlayerReload');
-            player.play();
+            playerBufferState.lastFixTime = Date.now();
+            // FIX: Only resume playback if the player wasn't paused by the user before the reload
+            if (!wasPaused) {
+                player.play();
+            }
             if (localStorageHookFailed && (currentQualityLS || currentMutedLS || currentVolumeLS)) {
                 setTimeout(() => {
                     try {
@@ -915,26 +928,28 @@
         window.realFetch = realFetch;
         window.fetch = function(url, init, ...args) {
             if (typeof url === 'string') {
-                if (url.includes('gql')) {
-                    let deviceId = init.headers['X-Device-Id'];
-                    if (typeof deviceId !== 'string') {
-                        deviceId = init.headers['Device-ID'];
-                    }
-                    if (typeof deviceId === 'string' && GQLDeviceID != deviceId) {
-                        GQLDeviceID = deviceId;
-                        postTwitchWorkerMessage('UpdateDeviceId', GQLDeviceID);
-                    }
-                    if (typeof init.headers['Client-Version'] === 'string' && init.headers['Client-Version'] !== ClientVersion) {
-                        postTwitchWorkerMessage('UpdateClientVersion', ClientVersion = init.headers['Client-Version']);
-                    }
-                    if (typeof init.headers['Client-Session-Id'] === 'string' && init.headers['Client-Session-Id'] !== ClientSession) {
-                        postTwitchWorkerMessage('UpdateClientSession', ClientSession = init.headers['Client-Session-Id']);
-                    }
-                    if (typeof init.headers['Client-Integrity'] === 'string' && init.headers['Client-Integrity'] !== ClientIntegrityHeader) {
-                        postTwitchWorkerMessage('UpdateClientIntegrityHeader', ClientIntegrityHeader = init.headers['Client-Integrity']);
-                    }
-                    if (typeof init.headers['Authorization'] === 'string' && init.headers['Authorization'] !== AuthorizationHeader) {
-                        postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader = init.headers['Authorization']);
+               if (url.includes('gql')) {
+                    if (init?.headers) {
+                        let deviceId = init.headers['X-Device-Id'];
+                        if (typeof deviceId !== 'string') {
+                            deviceId = init.headers['Device-ID'];
+                        }
+                        if (typeof deviceId === 'string' && GQLDeviceID != deviceId) {
+                            GQLDeviceID = deviceId;
+                            postTwitchWorkerMessage('UpdateDeviceId', GQLDeviceID);
+                        }
+                        if (typeof init.headers['Client-Version'] === 'string' && init.headers['Client-Version'] !== ClientVersion) {
+                            postTwitchWorkerMessage('UpdateClientVersion', ClientVersion = init.headers['Client-Version']);
+                        }
+                        if (typeof init.headers['Client-Session-Id'] === 'string' && init.headers['Client-Session-Id'] !== ClientSession) {
+                            postTwitchWorkerMessage('UpdateClientSession', ClientSession = init.headers['Client-Session-Id']);
+                        }
+                        if (typeof init.headers['Client-Integrity'] === 'string' && init.headers['Client-Integrity'] !== ClientIntegrityHeader) {
+                            postTwitchWorkerMessage('UpdateClientIntegrityHeader', ClientIntegrityHeader = init.headers['Client-Integrity']);
+                        }
+                        if (typeof init.headers['Authorization'] === 'string' && init.headers['Authorization'] !== AuthorizationHeader) {
+                            postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader = init.headers['Authorization']);
+                        }
                     }
                     // Get rid of mini player above chat - TODO: Reject this locally instead of having server reject it
                     if (init && typeof init.body === 'string' && init.body.includes('PlaybackAccessToken') && init.body.includes('picture-by-picture')) {
@@ -995,7 +1010,7 @@
             if (typeof chrome !== 'undefined') {
                 const videos = document.getElementsByTagName('video');
                 if (videos.length > 0) {
-                    if (hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true)) {
+                    if (hidden && hidden.apply(document) === true || (webkitHidden && webkitHidden.apply(document) === true)) {
                         wasVideoPlaying = !videos[0].paused && !videos[0].ended;
                     } else if (wasVideoPlaying && !videos[0].ended && videos[0].paused && videos[0].muted) {
                         videos[0].play();
